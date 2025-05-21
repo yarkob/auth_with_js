@@ -4,50 +4,6 @@ const https = require('https');
 const port = 3000;
 const host = '127.0.0.1';
 
-const requestLoggerHandler = (req, res, next) => {
-  const startTime = Date.now();
-  res.on('finish', () => {
-    const duration = Date.now() - startTime;
-    console.log(`Request ${req.method} ${req.url} completed in ${duration}ms`);
-  });
-  next();
-};
-
-const rateLimits = {};
-const rateLimitHandler = (req, res, next) => {
-  const ip = req.socket.remoteAddress;
-  if (!rateLimits[ip]) {
-    rateLimits[ip] = 1;
-  } else {
-    rateLimits[ip]++;
-  }
-
-  console.log('rateLimits[ip]', rateLimits[ip]);
-
-  if (rateLimits[ip] > 10) {
-    res.statusCode = 429;
-    res.end('Too Many Requests');
-    return;
-  }
-  next();
-};
-
-const authorizationHandler = (req, res, next) => {
-  if (!req.headers.authorization) {
-    res.statusCode = 401;
-    res.end('Unauthorized');
-    return;
-  }
-  next();
-}
-
-const asyncMiddleware = (req, res, next) => {
-  setTimeout(() => {
-    console.log('Async middleware executed');
-    next();
-  }, 1000);
-}
-
 class Router {
   routes = {
     'get': {},
@@ -73,9 +29,11 @@ class Router {
   }
 
   handle(req, res) {
-    const url = req.url;
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    req.query = Object.fromEntries(url.searchParams.entries());
     const method = req.method.toLowerCase();
-    const handlers = this.routes[method][url];
+    const path = url.pathname;
+    const handlers = this.routes[method][path];
 
     const allHandlers = [...this.middlewares, ...(handlers || [])];
 
@@ -115,21 +73,17 @@ class Router {
 
 const router = new Router();
 
-router.use(requestLoggerHandler);
-router.use(rateLimitHandler);
-router.use(asyncMiddleware);
-
 router.get('/', (req, res) => {
   res.end('Public content');
 })
 
-router.get('/private', authorizationHandler, (req, res) => {
-  res.end('Private content - get');
-})
-
-router.post('/private', authorizationHandler,(req, res) => {
-  res.end('Private content - post');
-})
+// router.get('/private', authorizationHandler, (req, res) => {
+//   res.end('Private content - get');
+// })
+//
+// router.post('/private', authorizationHandler,(req, res) => {
+//   res.end('Private content - post');
+// })
 
 router.notFound((req, res) => {
   res.end("Pass isn't found - custom");
@@ -168,82 +122,147 @@ router.get('/read-cookie', (req, res) => {
   res.end(html)
 });
 
-router.get('/ten-sec-cookie', (req, res) => {
-  res.setHeader('Set-Cookie', 'ten_sec_cookie=done; Max-Age=10');
-  res.end('Cookie set!');
+// const sessionTimeout = 1 * 60 * 1000;
+//
+// setInterval(() => {
+//   const now = Date.now();
+//   for (const sessionId in sessions) {
+//     console.log("🔹 Check Session's expire time:", sessionId, now - sessions[sessionId], sessionTimeout);
+//     if (now - sessions[sessionId].createdAt > sessionTimeout) {
+//       delete sessions[sessionId];
+//     }
+//   }
+// }, 10 * 1000)
+
+const sessions = {};
+
+router.get('/create-session', (req, res) => {
+  const name = req.query?.name || 'Anonymous';
+  const email = req.query?.email || 'Anonymous';
+  const password = req.query?.password || 'Anonymous';
+  // const sessionId = Math.random().toString(36).substring(2);
+  const cookies = req.headers.cookie || '';
+  console.log('🔹 Received Cookies:', cookies);
+  const oldCookies = cookies.split('; ').find(cookie => cookie.startsWith('sessionId='))?.split('=')[1];
+  const sessionId = oldCookies ?? Math.random().toString(36).substring(2);
+  sessions[sessionId] = oldCookies ? { ...sessions[sessionId], createdAt: new Date() } : { theme: 'light', username: name, createdAt: new Date(), email, password };
+
+  console.log('🔹 New session created:', sessions);
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Set-Cookie', `sessionId=${sessionId}; HttpOnly; Secure; SameSite=Strict`);
+  res.end(`✅ Session created! ID: ${sessionId}`);
 });
 
-router.get('/fifteen-sec-cookie', (req, res) => {
-  const now = new Date();
-  const fifteenSecondsLater = new Date(now.getTime() + 15 * 1000);
-  res.setHeader('Set-Cookie', `fifteen_sec_cookie=${fifteenSecondsLater.toUTCString()}; Expires=${fifteenSecondsLater.toUTCString()}`);
-  res.end('Cookies set!');
+router.get('/destroy-session', (req, res) => {
+  const cookies = req.headers.cookie || '';
+  const sessionId = cookies.split('; ').find(cookie => cookie.startsWith('sessionId='))?.split('=')[1];
+
+  console.log('🔹 Received sessionId:', sessionId);
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+
+  if (!sessionId || !sessions[sessionId]) {
+    return res.end('⚠️ No session found!')
+  }
+
+  if (sessionId) {
+    delete sessions[sessionId];
+  }
+
+  console.log('🔹 All sessions:', sessions);
+
+  res.setHeader('Set-Cookie', `sessionId=; HttpOnly; Secure; SameSite=Strict; Max-Age=0`);
+  res.end(`✅ Session destroyed! ID: ${sessionId}`);
 });
 
-router.get('/set-domain-cookie', (req, res) => {
-  const hostWithoutPort = req.headers.host.split(';')[0];
-  res.setHeader('Set-Cookie', `domain_cookie=${hostWithoutPort}; Domain=${hostWithoutPort}`);
-  res.end('Cookies set!');
-})
+router.get('/set-theme', (req, res) => {
+  const cookies = req.headers.cookie || '';
+  const sessionId = cookies.split('; ').find(cookie => cookie.startsWith('sessionId='))?.split('=')[1];
 
-router.get('/read-cookie/sub-route', (req, res) => {
-  const cookies = req.headers.cookie || 'No cookies';
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
 
-  res.setHeader('Content-Type', 'text/html');
+  if (!sessionId || !sessions[sessionId]) {
+    return '⚠️ No session found!';
+  }
 
-  const html = `
+  sessions[sessionId].theme = sessions[sessionId].theme === 'light' ? 'dark' : 'light';
+  const session = sessionId && sessions[sessionId];
+  res.end(`
     <html>
       <head>
-        <title>Cookies</title>
+        <title>Session</title>  
+        <style>
+          body {
+            background-color: ${session?.theme === 'dark' ? '#333' : '#ccc'};
+            color: ${session?.theme === 'dark' ? '#ccc' : '#333'};
+          }
+        </style>
       </head>
       <body>
-        <h1>Cookies from Client</h1>
-          ${
-            cookies.split(';').map(cookie => {
-              const [name, value] = cookie.split('=');
-              return `<p>${name.trim()}: ${value}</p>`;
-            }).join('')
-          }
+        <p>🎨 Theme was changed to ${sessions[sessionId].theme}</p>
       </body>
     </html>
-  `;
-
-  res.end(html)
+  `);
 });
 
-const generateLargeCookie = (size) => `test_large=${'a'.repeat(size)}`;
+const regenerateSession = (oldSessionId) => {
+  const newSessionId = Math.random().toString(36).substring(2);
+  sessions[newSessionId] = { ...sessions[oldSessionId] };
+  delete sessions[oldSessionId];
+  return newSessionId;
+};
 
-const largeCookie = generateLargeCookie(4096);
-router.get('/large-cookie', (req, res) => {
-  res.setHeader('Set-Cookie', largeCookie);
-  res.end('Cookies set!');
-})
+router.get('/login', (req, res) => {
+  const { username, password } = req.query;
 
-const generateManyCookies = (count) => {
-  const cookies = [];
-  for (let i = 1; i <= count; i++) {
-    cookies.push(`cookie_many${i.toString().padStart(3, '0')}=value${i.toString().repeat(10)}`);
+  if (username !== 'admin' && password !== 'password') {
+    return res.end('❌ Wrong data!');
   }
-  return cookies;
-};
-const manyCookies = generateManyCookies(185);
-router.get('/many-cookies', (req, res) => {
-  res.setHeader('Set-Cookie', manyCookies);
-  res.end('Cookies set!');
+
+  const cookies = req.headers.cookie || '';
+  const oldSessionId = cookies.split('; ').find(cookie => cookie.startsWith('sessionId='))?.split('=')[1];
+
+  const newSessionId = oldSessionId ? regenerateSession(oldSessionId) : Math.random().toString(36).substring(2);
+  console.log('🔹 Received sessionId:', oldSessionId, ' => ', newSessionId);
+  if (!oldSessionId) sessions[newSessionId] = { theme: 'light', username, createdAt: new Date(), email, password };
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Set-Cookie', `sessionId=${newSessionId}; HttpOnly; Secure; SameSite=Strict`);
+  res.end('✅ You are in! sessionId was updated.');
 });
 
-// const port = 3443;
-const fs = require('fs');
-const options = {
-  key: fs.readFileSync('key.pem'),
-  cert: fs.readFileSync('cert.pem'),
-};
+router.get('/read-session', (req, res) => {
+  const cookies = req.headers.cookie || '';
+  const sessionId = cookies.split('; ').find(cookie => cookie.startsWith('sessionId='))?.split('=')[1];
 
-// https.createServer(options, (req, res) => {
-//   router.handle(req, res);
-// }).listen(port, host, () => {
-//   console.log(`Server running https://${host}:${port}`);
-// });
+  console.log('🔹 Received sessionId:', sessionId);
+  console.log('🔹 All sessions:', sessions);
+
+  const session = sessionId && sessions[sessionId];
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+
+  res.end(`
+    <html>
+      <head>
+        <title>Session</title>  
+        <style>
+          body {
+            background-color: ${session?.theme === 'dark' ? '#333' : '#ccc'};
+            color: ${session?.theme === 'dark' ? '#ccc' : '#333'};
+          }
+        </style>
+      </head>
+      <body>
+        <h1>Session from Client</h1>
+        ${session ? `
+          <p>🎨 Theme: ${session.theme}</p>
+          <p><a href="/set-theme">🔄 Change theme</a></p>
+        ` : `<p>⚠️ No session found</p>`}
+      </body>
+    </html>
+  `)
+});
 
 http.createServer((req, res) => {
   router.handle(req, res);
